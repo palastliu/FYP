@@ -12,6 +12,7 @@ from transformers import BertTokenizer, BertForSequenceClassification
 
 from src.config import BERT_MODEL_DIR, MAX_LEN, OUTPUT_DIR
 from src.fuzzy_system import infer_sentiment, get_default_params
+from src.aspect_mapper import map_aspect, aspect_priority
 
 
 try:
@@ -20,9 +21,6 @@ except OSError:
     NLP = None
 
 
-# -----------------------------
-# Sentiment cue dictionaries
-# -----------------------------
 POSITIVE_CUES = {
     "good", "great", "excellent", "amazing", "awesome", "easy", "helpful",
     "smooth", "love", "like", "best", "nice", "useful", "fast", "stable",
@@ -43,39 +41,6 @@ NEUTRAL_CUES = {
 
 NEGATIONS = {"not", "no", "never", "none", "hardly", "barely", "n't"}
 
-# -----------------------------
-# Aspect keywords
-# Editable / extensible
-# -----------------------------
-ASPECT_KEYWORDS = {
-    "service": {
-        "service", "support", "staff", "reply", "response", "customer",
-        "team", "help", "refund", "contact", "assistance"
-    },
-    "performance": {
-        "crash", "freeze", "bug", "error", "slow", "lag", "battery",
-        "drain", "loading", "performance", "speed", "stability", "memory"
-    },
-    "usability": {
-        "easy", "use", "using", "simple", "difficult", "hard", "user",
-        "friendly", "convenient", "install", "setup", "navigation"
-    },
-    "interface": {
-        "design", "interface", "layout", "screen", "ui", "look",
-        "theme", "color", "display", "home"
-    },
-    "pricing": {
-        "price", "pricing", "payment", "subscription", "premium",
-        "free", "version", "pro", "cost", "paid", "purchase", "buy"
-    },
-    "feature": {
-        "calendar", "task", "widget", "feature", "option", "list",
-        "tracker", "reminder", "notification", "sync", "integration",
-        "tool", "function"
-    }
-}
-
-OVERALL_TERMS = {"app", "application", "software", "tool", "program"}
 PRONOUN_STARTS = {"it", "this", "that", "which", "these", "those"}
 GENERIC_WEAK_WORDS = {
     "issue", "problem", "thing", "stuff", "way", "time", "app", "version"
@@ -92,9 +57,6 @@ BAD_EXACT_PHRASES = {
 }
 
 
-# -----------------------------
-# Model loading
-# -----------------------------
 def load_model_and_tokenizer(model_dir):
     tokenizer = BertTokenizer.from_pretrained(model_dir)
     model = BertForSequenceClassification.from_pretrained(model_dir)
@@ -128,9 +90,6 @@ def predict_bert_probabilities(text, model, tokenizer, device):
     return probs[0], probs[1], probs[2]
 
 
-# -----------------------------
-# User-facing label helpers
-# -----------------------------
 def generate_risk_level(final_label):
     if final_label == "negative":
         return "High"
@@ -174,9 +133,6 @@ def analyze_comment(text, model, tokenizer, device, params):
     }
 
 
-# -----------------------------
-# Evidence extraction
-# -----------------------------
 def normalize_phrase(text):
     return " ".join(str(text).strip().lower().split())
 
@@ -236,10 +192,6 @@ def assign_evidence_label(pos_score, neg_score, neu_score, min_margin=0.35):
 
 
 def is_natural_phrase(phrase):
-    """
-    Final phrase cleaning:
-    remove weak, repetitive, or unnatural phrases.
-    """
     if phrase in BAD_EXACT_PHRASES:
         return False
 
@@ -250,11 +202,9 @@ def is_natural_phrase(phrase):
     if len(words) < 2:
         return False
 
-    # repeated words like "option option", "version version"
     if len(words) >= 2 and len(set(words)) == 1:
         return False
 
-    # pronoun-led weak phrases
     if words[0] in PRONOUN_STARTS:
         has_strong_noun = any(
             t.pos_ in {"NOUN", "PROPN"} and t.lemma_.lower() not in GENERIC_WEAK_WORDS
@@ -263,13 +213,9 @@ def is_natural_phrase(phrase):
         if not has_strong_noun:
             return False
 
-    # overly generic app phrases in negative/neutral pattern
-    if len(words) == 2 and words[1] in OVERALL_TERMS and words[0] in {"bad", "good", "nice"}:
-        return True  # allow as overall experience
-    if len(words) == 2 and words[0] in {"problem", "issue"} and words[1] in OVERALL_TERMS:
+    if len(words) == 2 and words[0] in {"problem", "issue"} and words[1] in {"app", "version"}:
         return False
 
-    # weak verb-led generic phrases
     if len(words) == 2 and words[0] in WEAK_VERBS and words[1] in GENERIC_WEAK_WORDS:
         return False
 
@@ -277,16 +223,12 @@ def is_natural_phrase(phrase):
 
 
 def extract_evidence_candidates(text):
-    """
-    Extract natural evidence phrases.
-    """
     if NLP is None:
         return []
 
     doc = NLP(str(text))
     candidates = []
 
-    # 1. subject + be + complement
     for token in doc:
         if token.lemma_ == "be" and token.pos_ in {"AUX", "VERB"}:
             subj = None
@@ -302,7 +244,6 @@ def extract_evidence_candidates(text):
                 phrase = normalize_phrase(f"{subj.text} {token.text} {comp.text}")
                 candidates.append((phrase, token))
 
-    # 2. verb + adverb / verb + object
     for token in doc:
         if token.pos_ == "VERB":
             adv = None
@@ -322,7 +263,6 @@ def extract_evidence_candidates(text):
                 phrase = normalize_phrase(f"{token.text} {dobj.text}")
                 candidates.append((phrase, token))
 
-    # 3. local patterns
     filtered_tokens = [t for t in doc if t.is_alpha and not t.is_stop]
 
     for i in range(len(filtered_tokens) - 1):
@@ -341,7 +281,6 @@ def extract_evidence_candidates(text):
             phrase = normalize_phrase(f"{t1.text} {t2.text}")
             candidates.append((phrase, t2))
 
-    # deduplicate + filter
     seen = set()
     unique_candidates = []
 
@@ -367,10 +306,6 @@ def extract_evidence_candidates(text):
 
 
 def classify_evidence_phrases(text):
-    """
-    Each evidence phrase gets one unique sentiment label.
-    Ambiguous phrases are dropped.
-    """
     if NLP is None:
         return []
 
@@ -396,48 +331,8 @@ def classify_evidence_phrases(text):
     return evidence_rows
 
 
-# -----------------------------
-# Aspect mapping
-# -----------------------------
-def map_aspect(evidence_phrase):
-    """
-    Generic, extensible aspect mapping.
-
-    Priority:
-    1. aspect keyword match
-    2. overall_experience if phrase is generic app praise/complaint
-    3. fallback general
-    """
-    words = set(evidence_phrase.lower().split())
-
-    best_aspect = None
-    best_score = 0
-
-    for aspect, keywords in ASPECT_KEYWORDS.items():
-        score = len(words & keywords)
-        if score > best_score:
-            best_score = score
-            best_aspect = aspect
-
-    if best_aspect is not None and best_score > 0:
-        return best_aspect
-
-    if words & OVERALL_TERMS and (words & POSITIVE_CUES or words & NEGATIVE_CUES):
-        return "overall_experience"
-
-    return "general"
-
-
-def aspect_priority(aspect):
-    if aspect in {"service", "performance", "usability", "interface", "pricing", "feature"}:
-        return 0
-    if aspect == "overall_experience":
-        return 1
-    return 2
-
-
 def build_evidence_summary(df, top_n=10):
-    print("Building evidence summary with final aspect optimization...")
+    print("Building evidence summary with external aspect mapper...")
 
     evidence_map = defaultdict(lambda: defaultdict(Counter))
     strength_map = defaultdict(dict)
@@ -449,7 +344,6 @@ def build_evidence_summary(df, top_n=10):
         evidence_rows = classify_evidence_phrases(text)
 
         for evidence in evidence_rows:
-            # keep only evidence matching the final label
             if evidence["evidence_label"] != row_label:
                 continue
 
@@ -493,9 +387,6 @@ def build_evidence_summary(df, top_n=10):
     return result_df
 
 
-# -----------------------------
-# Summary / output
-# -----------------------------
 def create_summary_sheet(result_df, original_df=None):
     label_counts = result_df["final_label"].value_counts()
     total = len(result_df)
@@ -617,7 +508,6 @@ def main():
 
     result_df = pd.DataFrame(results)
 
-    # assign main aspect to each comment
     comment_aspects = []
     for _, row in result_df.iterrows():
         evidence_rows = classify_evidence_phrases(row["comment"])
