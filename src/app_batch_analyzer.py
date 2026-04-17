@@ -1,5 +1,6 @@
 from collections import Counter, defaultdict
 from pathlib import Path
+import re
 
 print("APP_BATCH_ANALYZER FINAL VERIFIED VERSION LOADED")
 
@@ -55,6 +56,21 @@ BAD_EXACT_PHRASES = {
     "that is bad",
     "it is bad"
 }
+
+
+def make_safe_name(name: str) -> str:
+    name = Path(str(name)).stem.lower().strip()
+    name = re.sub(r"[^a-zA-Z0-9_-]+", "_", name)
+    name = re.sub(r"_+", "_", name).strip("_")
+    return name or "dataset"
+
+
+def build_output_paths(input_path: Path):
+    dataset_name = make_safe_name(input_path.stem)
+    report_dir = OUTPUT_DIR / "batch_outputs" / f"{dataset_name}_output"
+    figures_dir = report_dir / "figures"
+    excel_file = report_dir / "comment_analysis_report.xlsx"
+    return dataset_name, report_dir, figures_dir, excel_file
 
 
 def load_model_and_tokenizer(model_dir):
@@ -483,6 +499,8 @@ def main():
         print(f"File not found: {input_file}")
         return
 
+    dataset_name, report_dir, figures_dir, excel_file = build_output_paths(input_file)
+
     df = pd.read_csv(input_file)
 
     if "comment" not in df.columns:
@@ -493,6 +511,7 @@ def main():
         df.insert(0, "review_id", range(1, len(df) + 1))
 
     print(f"\nAnalyzing {len(df)} comments...")
+    print(f"Output folder: {report_dir}")
 
     results = []
     for _, row in df.iterrows():
@@ -542,11 +561,7 @@ def main():
     evidence_summary_df = build_evidence_summary(result_df, top_n=10)
     summary_df = create_summary_sheet(result_df, original_df=df)
 
-    report_dir = OUTPUT_DIR / "batch_reports"
-    figures_dir = report_dir / "figures"
     figures_dir.mkdir(parents=True, exist_ok=True)
-
-    excel_file = report_dir / "comment_analysis_report.xlsx"
 
     save_excel_report(
         summary_df=summary_df,
@@ -561,6 +576,7 @@ def main():
     plot_evidence_bar(evidence_summary_df, "positive", figures_dir / "positive_keywords_bar.png")
 
     print("\nAnalysis completed.")
+    print(f"Dataset name: {dataset_name}")
     print(f"Excel report saved to: {excel_file}")
     print(f"Charts saved to: {figures_dir}")
 
