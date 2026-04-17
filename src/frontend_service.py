@@ -1,5 +1,4 @@
 from pathlib import Path
-from collections import defaultdict, Counter
 import re
 
 import pandas as pd
@@ -71,6 +70,53 @@ def predict_probs(text, model, tokenizer, device):
     return probs[0], probs[1], probs[2]
 
 
+def build_single_explanation(final_label, aspect, p_neg, p_neu, p_pos, evidence_rows):
+    probs = {
+        "negative": float(p_neg),
+        "neutral": float(p_neu),
+        "positive": float(p_pos),
+    }
+    sorted_probs = sorted(probs.items(), key=lambda x: x[1], reverse=True)
+    top_label, top_prob = sorted_probs[0]
+    second_label, second_prob = sorted_probs[1]
+    margin = top_prob - second_prob
+
+    if evidence_rows:
+        top_evidence = evidence_rows[0]["evidence_phrase"]
+        evidence_text = f'The strongest supporting evidence phrase is "{top_evidence}".'
+    else:
+        evidence_text = "No strong evidence phrase was extracted from this short comment."
+
+    aspect_text = (
+        f'The comment is mainly interpreted under the "{aspect}" aspect.'
+        if aspect != "general"
+        else "No highly specific aspect was detected, so the comment is assigned to a general aspect."
+    )
+
+    if final_label == "positive":
+        tone_text = (
+            f'The comment is classified as positive because the positive probability ({p_pos:.3f}) '
+            f'is higher than the neutral ({p_neu:.3f}) and negative ({p_neg:.3f}) probabilities.'
+        )
+    elif final_label == "negative":
+        tone_text = (
+            f'The comment is classified as negative because the negative probability ({p_neg:.3f}) '
+            f'is higher than the neutral ({p_neu:.3f}) and positive ({p_pos:.3f}) probabilities.'
+        )
+    else:
+        tone_text = (
+            f'The comment is classified as neutral because the neutral probability ({p_neu:.3f}) '
+            f'is the strongest or the overall sentiment is relatively balanced.'
+        )
+
+    confidence_text = (
+        f"The decision margin over the next-closest class is {margin:.3f}, "
+        f"which suggests a {'clearer' if margin >= 0.20 else 'milder'} preference for this label."
+    )
+
+    return f"{tone_text} {aspect_text} {evidence_text} {confidence_text}"
+
+
 def analyze_single_comment(text, model, tokenizer, device):
     params = get_default_params()
 
@@ -95,6 +141,15 @@ def analyze_single_comment(text, model, tokenizer, device):
     else:
         main_aspect = "general"
 
+    explanation = build_single_explanation(
+        final_label=final_label,
+        aspect=main_aspect,
+        p_neg=p_neg,
+        p_neu=p_neu,
+        p_pos=p_pos,
+        evidence_rows=matched_evidence
+    )
+
     return {
         "comment": text,
         "p_neg": p_neg,
@@ -105,6 +160,7 @@ def analyze_single_comment(text, model, tokenizer, device):
         "aspect": main_aspect,
         "risk_level": generate_risk_level(final_label),
         "action_hint": generate_action_hint(final_label),
+        "explanation": explanation,
         "top_rule": top_rule,
         "evidence_rows": matched_evidence
     }
