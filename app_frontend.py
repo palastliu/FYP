@@ -6,6 +6,12 @@ import streamlit as st
 
 from src.aspect_mapper import ASPECT_CONFIG
 from src.frontend_service import load_model, analyze_single_comment, run_batch_analysis
+from src.csv_preprocessor import (
+    guess_comment_column,
+    guess_id_column,
+    guess_score_column,
+    preprocess_uploaded_csv,
+)
 
 
 st.set_page_config(
@@ -229,8 +235,9 @@ with st.sidebar:
     st.markdown("""
 1. Choose a tab  
 2. Enter one comment or upload a CSV  
-3. Run analysis  
-4. Review labels, aspects, evidence, and export results  
+3. For CSVs, map columns if needed  
+4. Run analysis  
+5. Review labels, aspects, evidence, and export results  
 """)
     st.header("Current System")
     st.markdown("""
@@ -238,6 +245,7 @@ with st.sidebar:
 - Tsukamoto fuzzy inference  
 - Evidence phrase extraction  
 - Configurable aspect mapping  
+- CSV preprocessing layer  
 """)
     st.caption("Batch outputs are saved under `outputs/frontend_outputs/`.")
 
@@ -253,7 +261,8 @@ st.markdown(
 <div class="info-box">
 This system supports <b>single-comment sentiment analysis</b> and <b>batch CSV review analysis</b>.
 It provides not only sentiment labels, but also <b>rule-based explanations</b>, <b>evidence phrases</b>,
-and <b>aspect-level interpretation</b>.
+and <b>aspect-level interpretation</b>. It also includes a <b>CSV preprocessing layer</b> so that
+different review datasets can be mapped into a unified internal format before analysis.
 </div>
 """,
     unsafe_allow_html=True
@@ -327,22 +336,70 @@ with tab1:
 with tab2:
     st.markdown('<div class="section-title">Batch CSV Analysis</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="small-note">Upload a CSV file containing a <code>comment</code> column. Optional columns such as <code>review_id</code>, <code>score</code>, and <code>reference_label</code> are supported.</div>',
+        '<div class="small-note">Upload a CSV file. If the column names are different, use the mapping controls below to select the correct comment / id / score columns.</div>',
         unsafe_allow_html=True
     )
 
     uploaded_file = st.file_uploader("Upload a CSV file", type=["csv"])
 
     if uploaded_file is not None:
-        df = pd.read_csv(uploaded_file)
+        raw_df = pd.read_csv(uploaded_file)
 
-        st.markdown("### Preview")
-        st.dataframe(df.head(), use_container_width=True)
+        st.markdown("### Raw CSV Preview")
+        st.dataframe(raw_df.head(), use_container_width=True)
+
+        all_columns = list(raw_df.columns)
+
+        guessed_comment = guess_comment_column(all_columns)
+        guessed_id = guess_id_column(all_columns)
+        guessed_score = guess_score_column(all_columns)
+
+        st.markdown("### CSV Column Mapping")
+
+        m1, m2, m3 = st.columns(3)
+
+        with m1:
+            comment_col = st.selectbox(
+                "Comment column",
+                options=all_columns,
+                index=all_columns.index(guessed_comment) if guessed_comment in all_columns else 0,
+                help="Select the column that contains the review/comment text."
+            )
+
+        with m2:
+            id_options = ["<auto-generate>"] + all_columns
+            id_default = guessed_id if guessed_id in all_columns else "<auto-generate>"
+            id_col = st.selectbox(
+                "ID column",
+                options=id_options,
+                index=id_options.index(id_default),
+                help="If there is no ID column, choose <auto-generate>."
+            )
+
+        with m3:
+            score_options = ["<none>"] + all_columns
+            score_default = guessed_score if guessed_score in all_columns else "<none>"
+            score_col = st.selectbox(
+                "Score column",
+                options=score_options,
+                index=score_options.index(score_default),
+                help="If there is no score/rating column, choose <none>."
+            )
+
+        processed_df = preprocess_uploaded_csv(
+            raw_df=raw_df,
+            comment_col=comment_col,
+            id_col=None if id_col == "<auto-generate>" else id_col,
+            score_col=None if score_col == "<none>" else score_col,
+        )
+
+        st.markdown("### Processed Preview")
+        st.dataframe(processed_df.head(), use_container_width=True)
 
         if st.button("Run Batch Analysis", type="primary"):
             with st.spinner("Running batch analysis..."):
                 result_df, summary_df, evidence_summary_df, excel_file, figures_dir, dataset_name, output_dir = run_batch_analysis(
-                    df, uploaded_file.name, model, tokenizer, device
+                    processed_df, uploaded_file.name, model, tokenizer, device
                 )
 
             st.success(f"Batch analysis completed. Output folder: {output_dir}")
